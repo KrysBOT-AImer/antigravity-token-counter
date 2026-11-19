@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;">
+  <title>Token Counter</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="header">
+      <div class="header-top">
+        <div class="brand">
+          <span id="live-dot" class="live-dot" title="Polling active" aria-hidden="true"></span>
+          <h1 class="title">Token Counter</h1>
+        </div>
+        <div class="header-actions">
+          <button
+            id="settings-toggle"
+            type="button"
+            class="icon-btn"
+            aria-expanded="false"
+            aria-controls="settings-drawer"
+            title="Threshold Settings"
+            aria-label="Threshold Settings"
+          >
+            <svg class="icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.25"></circle>
+              <path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.58 3.58l1.06 1.06M11.36 11.36l1.06 1.06M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="tracker-row">
+        <label class="sr-only" for="tracking-select">Tracked Session</label>
+        <select id="tracking-select" class="tracking-select" aria-label="Tracked Session">
+          <option value="current">Current Tab</option>
+          <option value="auto">Auto-Follow Active</option>
+          <optgroup id="sessions-optgroup" label="Recent Main Sessions"></optgroup>
+        </select>
+      </div>
+
+      <div id="session-meta" class="session-meta hidden">
+        <span id="session-title" class="session-title"></span>
+        <div class="session-badges">
+          <span id="main-only-badge" class="badge badge-safe" title="Strictly monitoring Main Session only; subagents and swarm workers are excluded">Main Only</span>
+          <span id="parent-badge" class="badge badge-info hidden" title="Opened from a child/subagent tab; showing its root main session">Tracking parent main</span>
+          <span id="fallback-badge" class="badge badge-warn hidden" title="SQLite unavailable; using on-disk ancestry and transcript fallback">FS fallback</span>
+        </div>
+      </div>
+    </header>
+
+    <section id="settings-drawer" class="card settings-drawer hidden" aria-label="Threshold Settings">
+      <div class="section-head">
+        <span class="section-title">Thresholds</span>
+        <div class="mode-toggle" role="group" aria-label="Threshold mode">
+          <button type="button" id="mode-auto-btn" class="mode-btn active" aria-pressed="true">Auto (Model Profile)</button>
+          <button type="button" id="mode-manual-btn" class="mode-btn" aria-pressed="false">Manual Override</button>
+        </div>
+      </div>
+
+      <div id="active-profile-readout" class="profile-readout">Auto: Default (Orchestrator-Neon) · 120k / 175k / 250k</div>
+
+      <div class="preset-group" role="group" aria-label="Threshold presets">
+        <button type="button" class="chip-btn" data-preset="90000,130000,200000">Hydrogen 90k/130k</button>
+        <button type="button" class="chip-btn" data-preset="120000,175000,250000">Orch-Neon 120k/175k</button>
+        <button type="button" class="chip-btn" data-preset="140000,200000,300000">Neon 140k/200k</button>
+        <button type="button" class="chip-btn" data-preset="150000,200000,300000">Orch-Carbon 150k/200k</button>
+        <button type="button" class="chip-btn" data-preset="160000,220000,320000">Carbon 160k/220k</button>
+      </div>
+
+      <form id="settings-form" class="settings-form" novalidate>
+        <div class="field-grid">
+          <label class="field">
+            <span class="field-label">Caution</span>
+            <input id="input-caution" type="number" min="1000" max="1999999" step="1000" required>
+          </label>
+          <label class="field">
+            <span class="field-label">Dumb Zone</span>
+            <input id="input-dumb" type="number" min="2000" max="2000000" step="1000" required>
+          </label>
+          <label class="field">
+            <span class="field-label">Gauge Max</span>
+            <input id="input-ceiling" type="number" min="3000" max="5000000" step="1000" required>
+          </label>
+        </div>
+
+        <div id="settings-feedback" class="settings-feedback hidden" role="status"></div>
+
+        <div class="settings-actions">
+          <button type="button" id="settings-reset" class="btn btn-ghost">Reset Defaults</button>
+          <button type="submit" id="settings-save" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </section>
+
+    <main id="main-content" class="main-content">
+      <div id="empty-state" class="card empty-state">
+        <p class="empty-title" id="empty-title">Waiting for session telemetry…</p>
+        <p class="empty-sub" id="empty-sub">Send a message in a main conversation to see live context tokens.</p>
+      </div>
+
+      <div id="dashboard" class="dashboard hidden">
+        <section class="card hero-card" aria-label="Context Usage">
+          <div class="hero-top">
+            <div class="hero-readout">
+              <span id="hero-tokens" class="hero-tokens">0</span>
+              <span class="hero-unit">tokens</span>
+            </div>
+            <span id="zone-pill" class="zone-pill zone-safe">SAFE</span>
+          </div>
+
+          <div class="hero-sub">
+            <span id="hero-pct" class="hero-pct">0% of 175k limit</span>
+            <span id="hero-headroom" class="hero-headroom">175,000 left</span>
+          </div>
+
+          <div class="gauge-wrap" aria-hidden="true">
+            <div class="gauge-track">
+              <div id="gauge-fill" class="gauge-fill zone-safe" style="width: 0%"></div>
+              <div id="tick-caution" class="gauge-tick tick-caution" title="Caution threshold"></div>
+              <div id="tick-dumb" class="gauge-tick tick-dumb" title="Dumb Zone threshold"></div>
+            </div>
+            <div class="gauge-labels">
+              <span id="label-zero" class="gauge-label-start">0</span>
+              <span id="label-caution" class="gauge-label-tick">120k</span>
+              <span id="label-dumb" class="gauge-label-tick">175k</span>
+              <span id="label-ceiling" class="gauge-label-end">250k</span>
+            </div>
+          </div>
+
+          <div id="dumb-banner" class="alert-banner alert-dumb hidden" role="alert">
+            <div class="alert-text">
+              <strong>Dumb Zone reached.</strong> Context is high; quality may degrade.
+            </div>
+            <button type="button" id="copy-compact-btn" class="btn btn-danger-sm">Copy <code>/compact</code></button>
+          </div>
+
+          <div id="compaction-pending-banner" class="alert-banner alert-info hidden" role="status">
+            <span>Compaction recorded — awaiting next model turn for updated context.</span>
+          </div>
+
+          <div class="hero-footer">
+            <span id="model-badge" class="model-badge" title="">—</span>
+            <span id="delta-badge" class="delta-badge">—</span>
+          </div>
+        </section>
+
+        <section class="metrics-grid" aria-label="Token Breakdown">
+          <div class="card metric-card">
+            <div class="metric-label">Cache Read</div>
+            <div id="val-cache-read" class="metric-value">0</div>
+            <div id="sub-cache-hit" class="metric-sub">0% hit rate</div>
+          </div>
+
+          <div class="card metric-card">
+            <div class="metric-label">Uncached Input</div>
+            <div id="val-uncached" class="metric-value">0</div>
+            <div id="sub-uncached" class="metric-sub">New prompt delta</div>
+          </div>
+
+          <div class="card metric-card">
+            <div class="metric-label">Last Output</div>
+            <div id="val-output" class="metric-value">0</div>
+            <div id="sub-output" class="metric-sub">Step 0</div>
+          </div>
+
+          <div class="card metric-card">
+            <div class="metric-label">Burn Rate</div>
+            <div id="val-burn" class="metric-value">—</div>
+            <div id="sub-burn" class="metric-sub">Peak: 0</div>
+          </div>
+        </section>
+
+        <section class="card chart-card" aria-label="Context Growth Chart">
+          <div class="section-head">
+            <span class="section-title">Context Growth</span>
+            <span id="chart-meta" class="chart-meta">0 turns</span>
+          </div>
+
+          <div class="chart-wrap" id="chart-wrap">
+            <svg id="growth-chart" class="growth-chart" viewBox="0 0 360 156" role="img" aria-label="Context tokens per step"></svg>
+            <div id="chart-tooltip" class="chart-tooltip hidden" role="status"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

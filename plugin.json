@@ -1,0 +1,9 @@
+{
+  "name": "token-counter",
+  "displayName": "Token Counter",
+  "version": "1.0.0",
+  "author": "KrysBOT-AImer",
+  "license": "MIT",
+  "description": "Live main-session context token monitor to avoid context rot and model-specific dumb-zone thresholds.",
+  "logo": "assets/logo.svg"
+}
