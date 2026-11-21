@@ -15,6 +15,9 @@ import {
   readSessionModelFromGenMetadata,
 } from './lib/gen_metadata.mjs';
 import {
+  deriveOrchestratorTelemetry,
+  isOrchestratorPluginEnabled,
+  readLastKnownOrchestratorThresholds,
   readOrchestratorTelemetry,
   resolveOrchestratorTelemetryDir,
 } from './lib/orchestrator_telemetry.mjs';
@@ -307,12 +310,26 @@ export function createServerApp(options = {}) {
             maxAgeMs: options.telemetryMaxAgeMs,
           })
         : null;
-      const otelSig = otel
-        ? `${otel.timestamp}:${otel.active_tokens}:${otel.zone}:${otel.fork_eligible ? 1 : 0}:${otel.compact_recommended ? 1 : 0}`
-        : 'none';
+      const orchPluginEnabled = appDataDir ? isOrchestratorPluginEnabled(appDataDir) : false;
       const discoverySource = target.discoverySource || 'sqlite';
       const activeChildCount = target.activeChildCount ?? 0;
       const st = target.transcriptPath ? transcriptReader.stat(target.transcriptPath) : null;
+      const TRANSCRIPT_SKEW_GRACE_MS = 2000;
+      const otelTsMs = otel ? Date.parse(otel.timestamp) : NaN;
+      const guardPredatesTranscript = Boolean(
+        otel &&
+          st &&
+          Number.isFinite(otelTsMs) &&
+          st.mtimeMs <= nowMs + TRANSCRIPT_SKEW_GRACE_MS &&
+          st.mtimeMs > otelTsMs + TRANSCRIPT_SKEW_GRACE_MS
+      );
+      const otelSig = [
+        otel
+          ? `${otel.timestamp}:${otel.active_tokens}:${otel.zone}:${otel.fork_eligible ? 1 : 0}:${otel.compact_recommended ? 1 : 0}`
+          : 'none',
+        orchPluginEnabled ? '1' : '0',
+        guardPredatesTranscript ? '1' : '0',
+      ].join(':');
       const fileSig = st ? `${st.mtimeMs}:${st.size}` : '0:-1';
       const etag = [
         target.id,
@@ -341,6 +358,22 @@ export function createServerApp(options = {}) {
       });
       const title = target.title || derived.firstUserPrompt || target.id.slice(0, 8);
 
+      let orchestrator = null;
+      if (otel && !guardPredatesTranscript) {
+        orchestrator = otel;
+      } else if (orchPluginEnabled) {
+        const lastThresholds =
+          otel?.thresholds ||
+          (appDataDir ? readLastKnownOrchestratorThresholds(appDataDir, target.id) : null);
+        orchestrator = deriveOrchestratorTelemetry(target.id, derived.metrics.contextTokens, {
+          thresholds: lastThresholds,
+          timestamp: st?.mtimeMs
+            ? new Date(st.mtimeMs).toISOString()
+            : new Date(nowMs).toISOString(),
+          nowMs,
+        });
+      }
+
       return {
         unchanged: false,
         etag,
@@ -362,7 +395,7 @@ export function createServerApp(options = {}) {
         metrics: derived.metrics,
         series: derived.series,
         compactions: derived.compactions,
-        orchestrator: otel,
+        orchestrator,
       };
     },
     'GET'

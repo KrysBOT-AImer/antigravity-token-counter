@@ -386,8 +386,13 @@
     if (guardPill) {
       const src = otel.source || 'guard';
       const ts = otel.timestamp ? ` · ${otel.timestamp}` : '';
-      guardPill.textContent = 'Orchestrator Guard';
-      guardPill.title = `Source: ${src}${ts}`;
+      if (src === 'derived_transcript') {
+        guardPill.textContent = 'Orchestrator (Derived)';
+        guardPill.title = `Derived from live transcript (Orchestrator plugin enabled; waiting for next tool call)${ts}`;
+      } else {
+        guardPill.textContent = 'Orchestrator Guard';
+        guardPill.title = `Source: ${src}${ts}`;
+      }
     }
 
     const forkPill = $('orch-fork-pill');

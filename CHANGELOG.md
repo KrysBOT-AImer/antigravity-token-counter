@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Orchestrator v2.1.0 Telemetry Bridge**: Reads strict-validated, freshness-checked (`<= 10 min`) guard telemetry from `sidecar_data/token-counter/orchestrator_telemetry/<conv_id>.json` via `lib/orchestrator_telemetry.mjs` and exposes it on `/api/metrics` (`orchestrator`).
+- **Resilient Derived-Transcript Fallback**: When the `orchestrator` plugin is installed and enabled (`config/plugins/orchestrator/plugin.json` and not disabled in `config/config.json`), falls back to `derived_transcript` telemetry computed directly from live `transcript.jsonl` context tokens (preserving any last-known thresholds) across `0`-tool turns, stale telemetry (`> 10 min`), and post-`/compact` updates before the next guard tool call.
 - **Strict Guard-Mirror 4-Zone Hero Card**: Renders the 4-zone Orchestrator meter (`green` / `yellow` / `red` / `hard`), Fork-Gate (`<= 60K`) and Compact pills, and a Hard-Gate `/compact` quick-copy alert banner when `compact_recommended` is active.
-- **Auto-Mode Threshold Adoption & Live Watch**: Adopts Orchestrator v2.1.0 `60K / 110K / 160K` thresholds in `Auto` mode when live telemetry is present, and monitors `orchestrator_telemetry/` in `/api/watch` for instant UI updates and ETag invalidation.
+- **Auto-Mode Threshold Adoption & Live Watch**: Adopts Orchestrator v2.1.0 `64K / 120K / 160K` thresholds (`60K` Fork Gate) in `Auto` mode when live telemetry is present, and monitors `orchestrator_telemetry/` in `/api/watch` for instant UI updates and ETag invalidation.
 - **Bohemian Art Nouveau UI Refresh**: Updated light (`4000K`) and dark (`2700K`) themes with Crisp Flat-Tonal Minimalism styling.
 
 ## [1.0.0] - 2026-11-20

@@ -20,7 +20,8 @@ It runs with **zero external dependencies** on Antigravity's bundled `agy-node` 
 ## Key Features
 
 - **Orchestrator v2.1.0 Telemetry Integration**:
-  - Reads strict-validated, freshness-checked (`<= 10 min`) guard telemetry from `sidecar_data/token-counter/orchestrator_telemetry/<conv_id>.json`, exposes it on `/api/metrics` + `/api/watch`, and renders a strict guard-mirror 4-zone Hero Card (`green` / `yellow` / `red` / `hard`) with Fork-Gate / Compact pills and a Hard-Gate `/compact` banner.
+  - Reads strict-validated, freshness-checked (`<= 10 min`) guard telemetry from `sidecar_data/token-counter/orchestrator_telemetry/<conv_id>.json`, exposes it on `/api/metrics` + `/api/watch`, and renders a strict guard-mirror 4-zone Hero Card (`green` / `yellow` / `red` / `hard`) with Fork-Gate (`60K`) / Compact (`80K`) pills and a Hard-Gate `/compact` banner.
+  - **Resilient Derived-Transcript Fallback**: When the `orchestrator` plugin is installed and enabled (`config/plugins/orchestrator/plugin.json`), automatically derives live `derived_transcript` telemetry from `transcript.jsonl` (`64K / 120K / 160K`, `60K` Fork Gate, or last-known guard thresholds) during `0`-tool conversations, idle gaps (`> 10 min`), and post-`/compact` turns until the next tool call updates guard telemetry (returning `orchestrator: null` when Orchestrator is disabled or uninstalled).
 - **Bohemian Art Nouveau UI**:
   - Crisp Flat-Tonal Minimalism across `2700K` dark and `4000K` light themes.
 

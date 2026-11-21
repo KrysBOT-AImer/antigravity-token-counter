@@ -1,10 +1,84 @@
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 export const DEFAULT_TELEMETRY_STALE_MS = 10 * 60 * 1000;
 export const VALID_ORCHESTRATOR_ZONES = new Set(['green', 'yellow', 'red', 'hard']);
+export const DEFAULT_ORCHESTRATOR_THRESHOLDS = Object.freeze({
+  fork_max: 60_000,
+  yellow: 64_000,
+  red: 120_000,
+  hard: 160_000,
+});
+export const DEFAULT_COMPACT_RECOMMENDED_TOKENS = 80_000;
 
 const REQUIRED_THRESHOLD_KEYS = ['fork_max', 'yellow', 'red', 'hard'];
+
+function parsePositiveIntEnv(raw) {
+  if (raw === undefined || raw === null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isSafeInteger(n) || n <= 0) return null;
+  return n;
+}
+
+function extractValidThresholds(thresholds) {
+  if (!thresholds || typeof thresholds !== 'object' || Array.isArray(thresholds)) {
+    return null;
+  }
+  for (const key of REQUIRED_THRESHOLD_KEYS) {
+    const val = thresholds[key];
+    if (!Number.isFinite(val) || val <= 0) return null;
+  }
+  return {
+    fork_max: Math.round(thresholds.fork_max),
+    yellow: Math.round(thresholds.yellow),
+    red: Math.round(thresholds.red),
+    hard: Math.round(thresholds.hard),
+  };
+}
+
+/**
+ * Resolve default Orchestrator v2.1.0 thresholds with optional env overrides.
+ */
+export function resolveDefaultOrchestratorThresholds(env = process.env) {
+  const result = { ...DEFAULT_ORCHESTRATOR_THRESHOLDS };
+  if (!env || typeof env !== 'object') return result;
+
+  const forkMax = parsePositiveIntEnv(env.ORCHESTRATOR_FORK_MAX_TOKENS);
+  if (forkMax !== null) result.fork_max = forkMax;
+
+  const hardMax = parsePositiveIntEnv(env.ORCHESTRATOR_HARD_CONTEXT_TOKENS);
+  if (hardMax !== null) result.hard = hardMax;
+
+  return result;
+}
+
+/**
+ * Check whether the Orchestrator plugin is installed and enabled next to appDataDir.
+ * Fails closed (false) if appDataDir is missing or plugin.json is absent;
+ * defaults to true when plugin.json exists unless config.json explicitly sets enabled: false.
+ */
+export function isOrchestratorPluginEnabled(appDataDir) {
+  if (!appDataDir || typeof appDataDir !== 'string' || !appDataDir.trim()) return false;
+  try {
+    const configDir = join(dirname(appDataDir), 'config');
+    const pluginJsonPath = join(configDir, 'plugins', 'orchestrator', 'plugin.json');
+    if (!existsSync(pluginJsonPath)) return false;
+
+    const configPath = join(configDir, 'config.json');
+    try {
+      const raw = readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      if (cfg?.plugins?.orchestrator?.enabled === false) return false;
+    } catch {
+      // Missing or unreadable config.json defaults to enabled when plugin.json exists.
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Sanitize a conversation ID to match orchestrator_guard.py filename rules.
@@ -95,13 +169,8 @@ export function readOrchestratorTelemetry(
   const ageMs = Math.max(0, nowMs - tsMs);
   if (ageMs > maxAgeMs) return null;
 
-  if (!obj.thresholds || typeof obj.thresholds !== 'object' || Array.isArray(obj.thresholds)) {
-    return null;
-  }
-  for (const key of REQUIRED_THRESHOLD_KEYS) {
-    const val = obj.thresholds[key];
-    if (!Number.isFinite(val) || val <= 0) return null;
-  }
+  const validThresholds = extractValidThresholds(obj.thresholds);
+  if (!validThresholds) return null;
 
   return {
     schema_version: 1,
@@ -113,11 +182,64 @@ export function readOrchestratorTelemetry(
     zone: obj.zone,
     fork_eligible: obj.fork_eligible,
     compact_recommended: obj.compact_recommended,
-    thresholds: {
-      fork_max: Math.round(obj.thresholds.fork_max),
-      yellow: Math.round(obj.thresholds.yellow),
-      red: Math.round(obj.thresholds.red),
-      hard: Math.round(obj.thresholds.hard),
-    },
+    thresholds: validThresholds,
+  };
+}
+
+/**
+ * Read thresholds from the last telemetry file regardless of staleness.
+ * Returns normalized thresholds or null if missing or invalid.
+ */
+export function readLastKnownOrchestratorThresholds(appDataDir, convId) {
+  const filePath = orchestratorTelemetryPathFor(appDataDir, convId);
+  if (!filePath) return null;
+
+  let obj;
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  if (obj.schema_version !== 1) return null;
+  return extractValidThresholds(obj.thresholds);
+}
+
+/**
+ * Derive Orchestrator v2.1.0 telemetry directly from live transcript token counts.
+ */
+export function deriveOrchestratorTelemetry(
+  convId,
+  activeTokens,
+  { thresholds, timestamp, nowMs = Date.now(), env = process.env } = {}
+) {
+  const tokens = Number.isFinite(activeTokens) && activeTokens >= 0 ? Math.round(activeTokens) : 0;
+  const resolvedThresholds =
+    extractValidThresholds(thresholds) || resolveDefaultOrchestratorThresholds(env);
+
+  let zone = 'green';
+  if (tokens >= resolvedThresholds.hard) zone = 'hard';
+  else if (tokens >= resolvedThresholds.red) zone = 'red';
+  else if (tokens >= resolvedThresholds.yellow) zone = 'yellow';
+
+  const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const isoTs =
+    typeof timestamp === 'string' && timestamp.trim()
+      ? timestamp
+      : new Date(safeNowMs).toISOString();
+
+  return {
+    schema_version: 1,
+    conversation_id: String(convId),
+    timestamp: isoTs,
+    ageMs: 0,
+    active_tokens: tokens,
+    source: 'derived_transcript',
+    zone,
+    fork_eligible: tokens <= resolvedThresholds.fork_max,
+    compact_recommended: tokens >= DEFAULT_COMPACT_RECOMMENDED_TOKENS,
+    thresholds: resolvedThresholds,
   };
 }

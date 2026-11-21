@@ -952,3 +952,175 @@ test('server: orchestrator telemetry /api/metrics, ETag invalidation, /api/watch
   assert.equal(j4.unchanged, false);
   assert.equal(j4.orchestrator, null);
 });
+
+test('server: derived_transcript fallback when Orchestrator plugin is enabled (0-tool, stale, post-compact, and disabled)', async (t) => {
+  const { root, appDataDir, dataDir, uiDir, trPath } = setupEnv();
+  let app = null;
+  t.after(async () => {
+    if (app) await app.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const prevEnv = {
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN,
+    ANTIGRAVITY_SIDECAR_WEB_PORT: process.env.ANTIGRAVITY_SIDECAR_WEB_PORT,
+    ANTIGRAVITY_SIDECAR_UI_TOKEN: process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN,
+    ANTIGRAVITY_CONVERSATION_ID: process.env.ANTIGRAVITY_CONVERSATION_ID,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+  };
+  t.after(() => {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  process.env.ANTIGRAVITY_LS_ADDRESS = '127.0.0.1:1';
+  process.env.ANTIGRAVITY_CSRF_TOKEN = 'csrf-test';
+  process.env.ANTIGRAVITY_SIDECAR_WEB_PORT = '0';
+  process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN = 'secret-token';
+  process.env.ANTIGRAVITY_CONVERSATION_ID = 'main-1';
+  process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = dataDir;
+
+  // Enable Orchestrator plugin next to appDataDir
+  const configDir = join(root, 'config');
+  mkdirSync(join(configDir, 'plugins', 'orchestrator'), { recursive: true });
+  writeFileSync(
+    join(configDir, 'plugins', 'orchestrator', 'plugin.json'),
+    JSON.stringify({ name: 'orchestrator' }),
+    'utf-8'
+  );
+
+  const t0Ms = Date.parse('2026-11-21T12:00:00.000Z');
+  let fakeNowMs = t0Ms + 1000;
+  utimesSync(trPath, new Date(t0Ms - 5000), new Date(t0Ms - 5000));
+
+  app = createServerApp({
+    appDataDir,
+    dataDir,
+    uiDir,
+    locksPath: join(appDataDir, 'missing_locks'),
+    now: () => fakeNowMs,
+  });
+  const server = await app.run();
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  // 1. Enabled plugin + 0-tool conversation (no telemetry file) -> derived_transcript with live contextTokens (135000)
+  const r1 = await fetch(`${baseUrl}/api/metrics?conversationId=main-1&mode=current`);
+  assert.equal(r1.status, 200);
+  const j1 = await r1.json();
+  assert.ok(j1.orchestrator);
+  assert.equal(j1.orchestrator.source, 'derived_transcript');
+  assert.equal(j1.orchestrator.active_tokens, 135000);
+  assert.equal(j1.orchestrator.zone, 'red');
+  assert.equal(j1.orchestrator.fork_eligible, false);
+  assert.equal(j1.orchestrator.compact_recommended, true);
+  assert.deepEqual(j1.orchestrator.thresholds, {
+    fork_max: 60_000,
+    yellow: 64_000,
+    red: 120_000,
+    hard: 160_000,
+  });
+
+  // 2. Enabled plugin + stale telemetry (> 10 min) -> derived_transcript preserving custom thresholds
+  const otelDir = join(appDataDir, 'sidecar_data', 'token-counter', 'orchestrator_telemetry');
+  mkdirSync(otelDir, { recursive: true });
+  const otelPath = join(otelDir, 'main-1.json');
+  const customThresholds = { fork_max: 50_000, yellow: 70_000, red: 130_000, hard: 180_000 };
+  writeFileSync(
+    otelPath,
+    JSON.stringify({
+      schema_version: 1,
+      conversation_id: 'main-1',
+      timestamp: new Date(t0Ms - 15 * 60 * 1000).toISOString(),
+      active_tokens: 170_000,
+      source: 'transcript_usage',
+      zone: 'red',
+      fork_eligible: false,
+      compact_recommended: true,
+      thresholds: customThresholds,
+    }),
+    'utf-8'
+  );
+
+  const r2 = await fetch(`${baseUrl}/api/metrics?conversationId=main-1&mode=current`);
+  const j2 = await r2.json();
+  assert.equal(j2.orchestrator.source, 'derived_transcript');
+  assert.equal(j2.orchestrator.active_tokens, 135000);
+  assert.equal(j2.orchestrator.zone, 'red');
+  assert.deepEqual(j2.orchestrator.thresholds, customThresholds);
+
+  // 3. Enabled plugin + fresh guard telemetry superseded by post-/compact transcript update
+  writeFileSync(
+    otelPath,
+    JSON.stringify({
+      schema_version: 1,
+      conversation_id: 'main-1',
+      timestamp: new Date(t0Ms).toISOString(),
+      active_tokens: 165_000,
+      source: 'transcript_usage',
+      zone: 'hard',
+      fork_eligible: false,
+      compact_recommended: true,
+      thresholds: { fork_max: 60_000, yellow: 64_000, red: 120_000, hard: 160_000 },
+    }),
+    'utf-8'
+  );
+  const r3 = await fetch(`${baseUrl}/api/metrics?conversationId=main-1&mode=current`);
+  const j3 = await r3.json();
+  assert.equal(j3.orchestrator.source, 'transcript_usage');
+  assert.equal(j3.orchestrator.active_tokens, 165_000);
+  assert.equal(j3.orchestrator.zone, 'hard');
+
+  // Append CHECKPOINT + post-compact turn newer than guard timestamp (+5s > +2s skew grace)
+  appendFileSync(
+    trPath,
+    JSON.stringify({
+      step_index: 1,
+      type: 'CHECKPOINT',
+      content: '# Resuming from a compaction',
+      created_at: new Date(t0Ms + 4000).toISOString(),
+    }) +
+      '\n' +
+      JSON.stringify({
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        model: 'gemini-4-hydrogen-high',
+        input_tokens: 10_000,
+        cache_read_tokens: 12_000,
+        output_tokens: 150,
+        created_at: new Date(t0Ms + 5000).toISOString(),
+      }) +
+      '\n',
+    'utf-8'
+  );
+  utimesSync(trPath, new Date(t0Ms + 5000), new Date(t0Ms + 5000));
+  fakeNowMs = t0Ms + 6000;
+
+  const r4 = await fetch(
+    `${baseUrl}/api/metrics?conversationId=main-1&mode=current&etag=${encodeURIComponent(j3.etag)}`
+  );
+  const j4 = await r4.json();
+  assert.equal(j4.unchanged, false);
+  assert.notEqual(j4.etag, j3.etag);
+  assert.equal(j4.orchestrator.source, 'derived_transcript');
+  assert.equal(j4.orchestrator.active_tokens, 22_000);
+  assert.equal(j4.orchestrator.zone, 'green');
+  assert.equal(j4.orchestrator.fork_eligible, true);
+  assert.equal(j4.orchestrator.compact_recommended, false);
+
+  // 4. Disabled Orchestrator plugin (config.json enabled: false) -> invalidates ETag & returns null
+  writeFileSync(
+    join(configDir, 'config.json'),
+    JSON.stringify({ plugins: { orchestrator: { enabled: false } } }),
+    'utf-8'
+  );
+  const r5 = await fetch(
+    `${baseUrl}/api/metrics?conversationId=main-1&mode=current&etag=${encodeURIComponent(j4.etag)}`
+  );
+  const j5 = await r5.json();
+  assert.equal(j5.unchanged, false);
+  assert.notEqual(j5.etag, j4.etag);
+  assert.equal(j5.orchestrator, null);
+});
