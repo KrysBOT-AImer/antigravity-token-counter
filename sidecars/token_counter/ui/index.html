@@ -18,6 +18,22 @@
         </div>
         <div class="header-actions">
           <button
+            id="theme-toggle"
+            type="button"
+            class="icon-btn"
+            title="Switch to Light Theme (4000K)"
+            aria-label="Toggle Light / Dark Theme"
+            aria-pressed="false"
+          >
+            <svg class="icon icon-sun" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.75"></circle>
+              <path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"></path>
+            </svg>
+            <svg class="icon icon-moon hidden" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M13.2 9.9A5.5 5.5 0 0 1 6.1 2.8a5.5 5.5 0 1 0 7.1 7.1z"></path>
+            </svg>
+          </button>
+          <button
             id="settings-toggle"
             type="button"
             class="icon-btn"
@@ -27,8 +43,10 @@
             aria-label="Threshold Settings"
           >
             <svg class="icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-              <circle cx="8" cy="8" r="2.25"></circle>
-              <path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.58 3.58l1.06 1.06M11.36 11.36l1.06 1.06M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06"></path>
+              <path d="M2.5 4h11M2.5 8h11M2.5 12h11"></path>
+              <circle cx="5.5" cy="4" r="1.35" fill="currentColor"></circle>
+              <circle cx="10.5" cy="8" r="1.35" fill="currentColor"></circle>
+              <circle cx="6.5" cy="12" r="1.35" fill="currentColor"></circle>
             </svg>
           </button>
         </div>
@@ -113,6 +131,12 @@
             <span id="zone-pill" class="zone-pill zone-safe">SAFE</span>
           </div>
 
+          <div id="orch-pills" class="orch-pills hidden" aria-label="Orchestrator Guard Telemetry">
+            <span id="orch-guard-pill" class="badge badge-info">Orchestrator Guard</span>
+            <span id="orch-fork-pill" class="badge badge-safe">Fork OK (&lt;=60k)</span>
+            <span id="orch-compact-pill" class="badge badge-warn hidden">Compact Recommended</span>
+          </div>
+
           <div class="hero-sub">
             <span id="hero-pct" class="hero-pct">0% of 175k limit</span>
             <span id="hero-headroom" class="hero-headroom">175,000 left</span>
@@ -123,13 +147,22 @@
               <div id="gauge-fill" class="gauge-fill zone-safe" style="width: 0%"></div>
               <div id="tick-caution" class="gauge-tick tick-caution" title="Caution threshold"></div>
               <div id="tick-dumb" class="gauge-tick tick-dumb" title="Dumb Zone threshold"></div>
+              <div id="tick-hard" class="gauge-tick tick-hard hidden" title="Hard Gate threshold"></div>
             </div>
             <div class="gauge-labels">
               <span id="label-zero" class="gauge-label-start">0</span>
               <span id="label-caution" class="gauge-label-tick">120k</span>
               <span id="label-dumb" class="gauge-label-tick">175k</span>
+              <span id="label-hard" class="gauge-label-tick hidden">160k</span>
               <span id="label-ceiling" class="gauge-label-end">250k</span>
             </div>
+          </div>
+
+          <div id="hard-gate-banner" class="alert-banner alert-hard hidden" role="alert">
+            <div class="alert-text">
+              <strong>Hard Gate active (&gt;=<span id="hard-gate-threshold">160k</span>).</strong> New subagent, swarm, and workflow spawns are blocked. Stage <code>scratch/compact_anchor.md</code> and run <code>/compact</code>.
+            </div>
+            <button type="button" id="copy-hard-compact-btn" class="btn btn-hard-sm">Copy <code>/compact</code></button>
           </div>
 
           <div id="dumb-banner" class="alert-banner alert-dumb hidden" role="alert">

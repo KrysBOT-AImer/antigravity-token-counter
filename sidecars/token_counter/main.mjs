@@ -15,6 +15,10 @@ import {
   readSessionModelFromGenMetadata,
 } from './lib/gen_metadata.mjs';
 import {
+  readOrchestratorTelemetry,
+  resolveOrchestratorTelemetryDir,
+} from './lib/orchestrator_telemetry.mjs';
+import {
   createSettingsStore,
   DEFAULT_MODEL_PROFILE,
   MODEL_PROFILES,
@@ -123,6 +127,45 @@ function createViewWatcher({ appDataDir, dataDir, eventsDir, debounceMs = 40 } =
       watchers.push(w);
     } catch {
       // Missing dir or OS inotify limit: fail soft, polling fallback remains active
+    }
+  }
+
+  const otelDir = resolveOrchestratorTelemetryDir(appDataDir);
+  let otelWatched = false;
+  const attachOtelWatcher = () => {
+    if (closed || otelWatched || !otelDir || !existsSync(otelDir)) return false;
+    try {
+      const w = watch(otelDir, { persistent: false }, () => scheduleBump());
+      w.on('error', () => {});
+      watchers.push(w);
+      otelWatched = true;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (otelDir) {
+    if (existsSync(otelDir)) {
+      attachOtelWatcher();
+    } else {
+      const otelParentDir = dirname(otelDir);
+      if (existsSync(otelParentDir)) {
+        try {
+          const parentW = watch(otelParentDir, { persistent: false }, (_eventType, filename) => {
+            if (closed || otelWatched) return;
+            if ((!filename || filename === 'orchestrator_telemetry') && existsSync(otelDir)) {
+              if (attachOtelWatcher()) {
+                scheduleBump();
+              }
+            }
+          });
+          parentW.on('error', () => {});
+          watchers.push(parentW);
+        } catch {
+          // Fail open on watch errors
+        }
+      }
     }
   }
 
@@ -251,11 +294,22 @@ export function createServerApp(options = {}) {
           metrics: computeMetrics(null, settings).metrics,
           series: [],
           compactions: [],
+          orchestrator: null,
         };
       }
 
       const appDataDir = findAppDataDir(discoveryOpts);
       const genMeta = appDataDir ? readSessionModelFromGenMetadata(appDataDir, target.id) : null;
+      const nowMs = typeof options.now === 'function' ? options.now() : Date.now();
+      const otel = appDataDir
+        ? readOrchestratorTelemetry(appDataDir, target.id, {
+            nowMs,
+            maxAgeMs: options.telemetryMaxAgeMs,
+          })
+        : null;
+      const otelSig = otel
+        ? `${otel.timestamp}:${otel.active_tokens}:${otel.zone}:${otel.fork_eligible ? 1 : 0}:${otel.compact_recommended ? 1 : 0}`
+        : 'none';
       const discoverySource = target.discoverySource || 'sqlite';
       const activeChildCount = target.activeChildCount ?? 0;
       const st = target.transcriptPath ? transcriptReader.stat(target.transcriptPath) : null;
@@ -270,6 +324,7 @@ export function createServerApp(options = {}) {
         activeChildCount,
         fileSig,
         genMeta?.cacheSig || '',
+        otelSig,
         settingsStore.version(),
       ].join('|');
 
@@ -307,6 +362,7 @@ export function createServerApp(options = {}) {
         metrics: derived.metrics,
         series: derived.series,
         compactions: derived.compactions,
+        orchestrator: otel,
       };
     },
     'GET'

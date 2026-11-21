@@ -19,6 +19,11 @@ It runs with **zero external dependencies** on Antigravity's bundled `agy-node` 
 
 ## Key Features
 
+- **Orchestrator v2.1.0 Telemetry Integration**:
+  - Reads strict-validated, freshness-checked (`<= 10 min`) guard telemetry from `sidecar_data/token-counter/orchestrator_telemetry/<conv_id>.json`, exposes it on `/api/metrics` + `/api/watch`, and renders a strict guard-mirror 4-zone Hero Card (`green` / `yellow` / `red` / `hard`) with Fork-Gate / Compact pills and a Hard-Gate `/compact` banner.
+- **Bohemian Art Nouveau UI**:
+  - Crisp Flat-Tonal Minimalism across `2700K` dark and `4000K` light themes.
+
 - **Exact Context Telemetry & Compaction Tracking**:
   - Parses `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript.jsonl` incrementally and computes exact context held by the model on each `PLANNER_RESPONSE` step:
     ```text

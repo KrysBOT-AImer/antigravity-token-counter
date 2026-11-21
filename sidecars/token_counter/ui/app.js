@@ -32,7 +32,6 @@
     pollSeq: 0,
     inFlightMetrics: false,
     pollTimer: null,
-    copyResetTimer: null,
     chartPoints: [], // cached screen/data coords for hover
     pointerActive: false,
     hoverStepIndex: null,
@@ -48,22 +47,58 @@
     return uris.map((u) => String(u || '').trim()).filter(Boolean);
   }
 
+  const THEME_OVERRIDE_KEY = 'tc_theme_override';
+
+  function getThemeOverride() {
+    try {
+      const v = localStorage.getItem(THEME_OVERRIDE_KEY);
+      return v === 'dark' || v === 'light' ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function applyTheme(theme) {
+    const resolved = theme === 'light' ? 'light' : 'dark';
+    if (document.documentElement.dataset.theme !== resolved) {
+      document.documentElement.dataset.theme = resolved;
+    }
+    const btn = $('theme-toggle');
+    if (btn) {
+      const isLight = resolved === 'light';
+      btn.setAttribute('aria-pressed', String(isLight));
+      btn.title = isLight ? 'Switch to Dark Theme (2700K)' : 'Switch to Light Theme (4000K)';
+      btn.querySelector('.icon-sun')?.classList.toggle('hidden', isLight);
+      btn.querySelector('.icon-moon')?.classList.toggle('hidden', !isLight);
+    }
+  }
+
   // ---------- Host Theme Sync ----------
   function syncScheme() {
+    const override = getThemeOverride();
+    if (override) {
+      applyTheme(override);
+      return;
+    }
+    const rawBg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
+    if (!rawBg) {
+      applyTheme('dark');
+      return;
+    }
     const probe = document.createElement('span');
-    probe.style.cssText = 'position:absolute;visibility:hidden;color:var(--background, #f7f7f8)';
+    probe.style.cssText = 'position:absolute;visibility:hidden;color:var(--background, #162B37)';
     document.documentElement.appendChild(probe);
     const c = getComputedStyle(probe).color;
     probe.remove();
     const nums = (c.match(/[\d.]+/g) || []).map(Number);
-    if (nums.length < 3) return;
+    if (nums.length < 3) {
+      applyTheme('dark');
+      return;
+    }
     const scale = c.startsWith('color(') ? 1 : 255;
     const [r, g, b] = nums.slice(0, 3).map((v) => v / scale);
     const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    const theme = lum < 0.5 ? 'dark' : 'light';
-    if (document.documentElement.dataset.theme !== theme) {
-      document.documentElement.dataset.theme = theme;
-    }
+    applyTheme(lum < 0.5 ? 'dark' : 'light');
   }
 
   syncScheme();
@@ -250,9 +285,27 @@
     syncTrackingSelectValue();
   }
 
+  function resolveOrchestratorChartConfig(otel, eff, metrics) {
+    const isManual = eff.source === 'manual' || metrics.thresholdSource === 'manual';
+    if (!otel || isManual) return eff;
+    const ot = otel.thresholds || {};
+    const yellow = Number.isFinite(ot.yellow) ? ot.yellow : 120000;
+    const red = Number.isFinite(ot.red) ? ot.red : 140000;
+    const hard = Number.isFinite(ot.hard) ? ot.hard : 160000;
+    const activeTok = Number.isFinite(otel.active_tokens) ? otel.active_tokens : (metrics.contextTokens || 0);
+    const ceiling = Math.max(Math.round(hard * 1.25), activeTok, 200000);
+    return {
+      cautionThreshold: yellow,
+      dumbZoneThreshold: hard,
+      redThreshold: red,
+      gaugeCeiling: ceiling,
+      isOrchestratorAuto: true,
+    };
+  }
+
   // ---------- Rendering: Snapshot ----------
   function renderSnapshot(data) {
-    const { session, metrics, settings, effectiveThresholds, series = [], compactions = [] } = data;
+    const { session, metrics, settings, effectiveThresholds, orchestrator = null, series = [], compactions = [] } = data;
     const cfg = settings || state.settings || DEFAULTS;
     const eff = effectiveThresholds || cfg;
     state.effectiveThresholds = eff;
@@ -314,91 +367,209 @@
     $('empty-state').classList.add('hidden');
     $('dashboard').classList.remove('hidden');
 
-    renderHeroGauge(metrics, eff);
-    renderMetricsGrid(metrics, eff);
-    renderChart(series, compactions, eff);
+    const chartCfg = resolveOrchestratorChartConfig(orchestrator, eff, metrics);
+    renderHeroGauge(metrics, eff, orchestrator);
+    renderMetricsGrid(metrics, chartCfg, orchestrator);
+    renderChart(series, compactions, chartCfg);
   }
 
-  function renderHeroGauge(metrics, eff) {
-    const zone = metrics.zone || 'safe';
-    const ctx = metrics.contextTokens || 0;
-    const dumb = eff.dumbZoneThreshold || 175000;
-    const caution = eff.cautionThreshold || 120000;
-    const ceiling = eff.gaugeCeiling > dumb ? eff.gaugeCeiling : Math.round(dumb * 1.5);
+  function renderOrchestratorPills(otel, otelZone) {
+    const row = $('orch-pills');
+    if (!row) return;
+    if (!otel) {
+      row.classList.add('hidden');
+      return;
+    }
+    row.classList.remove('hidden');
+
+    const guardPill = $('orch-guard-pill');
+    if (guardPill) {
+      const src = otel.source || 'guard';
+      const ts = otel.timestamp ? ` · ${otel.timestamp}` : '';
+      guardPill.textContent = 'Orchestrator Guard';
+      guardPill.title = `Source: ${src}${ts}`;
+    }
+
+    const forkPill = $('orch-fork-pill');
+    if (forkPill) {
+      const forkMax = Number.isFinite(otel.thresholds?.fork_max) ? otel.thresholds.fork_max : 60000;
+      if (otel.fork_eligible === true) {
+        forkPill.className = 'badge badge-safe';
+        forkPill.textContent = `Fork OK (<=${fmtK(forkMax)})`;
+        forkPill.title = `Context <= ${fmtK(forkMax)}; subagent/swarm fork permitted`;
+      } else {
+        forkPill.className = 'badge badge-warn';
+        forkPill.textContent = 'Handoff Pack';
+        forkPill.title = `Context > fork_max (${fmtK(forkMax)}); use scratch/handoff_pack.md`;
+      }
+    }
+
+    const compactPill = $('orch-compact-pill');
+    if (compactPill) {
+      if (!otel.compact_recommended && otelZone !== 'hard') {
+        compactPill.classList.add('hidden');
+      } else if (otelZone === 'hard') {
+        compactPill.className = 'badge badge-hard';
+        compactPill.textContent = 'Compact Required';
+        compactPill.title = 'Hard Gate active — stage scratch/compact_anchor.md and run /compact';
+      } else {
+        compactPill.className = 'badge badge-warn';
+        compactPill.textContent = 'Compact Recommended';
+        compactPill.title = 'Context high — consider running /compact';
+      }
+    }
+  }
+
+  function renderHeroGauge(metrics, eff, orchestrator = null) {
+    const isManual = eff.source === 'manual' || metrics.thresholdSource === 'manual';
+    const otel = orchestrator && typeof orchestrator === 'object' ? orchestrator : null;
+    const otelZone = otel && ['green', 'yellow', 'red', 'hard'].includes(otel.zone) ? otel.zone : 'green';
+    const zone = otel ? otelZone : (metrics.zone || 'safe');
+    const ctx = otel && Number.isFinite(otel.active_tokens) ? otel.active_tokens : (metrics.contextTokens || 0);
 
     $('hero-tokens').textContent = fmtNum(ctx);
 
     const pill = $('zone-pill');
     pill.className = `zone-pill zone-${zone}`;
-    pill.textContent = zone === 'dumb' ? 'DUMB ZONE' : zone === 'caution' ? 'CAUTION' : 'SAFE';
+    if (otel) {
+      const labels = { green: 'GREEN', yellow: 'YELLOW', red: 'RED', hard: 'HARD GATE' };
+      pill.textContent = labels[otelZone];
+    } else {
+      pill.textContent = zone === 'dumb' ? 'DUMB ZONE' : zone === 'caution' ? 'CAUTION' : 'SAFE';
+    }
 
-    const pct = Number.isFinite(metrics.pctOfDumbZone)
-      ? Math.round(metrics.pctOfDumbZone)
-      : Math.round((ctx / dumb) * 100);
-    $('hero-pct').textContent = `${pct}% of ${fmtK(dumb)} limit`;
+    renderOrchestratorPills(otel, otelZone);
 
-    const headroom = Number.isFinite(metrics.headroomToDumbZone)
-      ? metrics.headroomToDumbZone
-      : dumb - ctx;
     const headroomEl = $('hero-headroom');
-    headroomEl.textContent = headroom >= 0
-      ? `${fmtNum(headroom)} left`
-      : `${fmtNum(Math.abs(headroom))} over limit`;
-    headroomEl.classList.toggle('over-limit', headroom < 0);
-
-    const fillPct = Math.max(0, Math.min(100, (ctx / ceiling) * 100));
     const fillEl = $('gauge-fill');
+    const tickCaution = $('tick-caution');
+    const tickDumb = $('tick-dumb');
+    const tickHard = $('tick-hard');
+    const lblCaution = $('label-caution');
+    const lblDumb = $('label-dumb');
+    const lblHard = $('label-hard');
+
+    let barCaution = eff.cautionThreshold || 120000;
+    let barLimit = eff.dumbZoneThreshold || 175000;
+    let barCeiling = eff.gaugeCeiling > barLimit ? eff.gaugeCeiling : Math.round(barLimit * 1.5);
+
+    if (otel && !isManual) {
+      const ot = otel.thresholds || {};
+      const yellow = Number.isFinite(ot.yellow) ? ot.yellow : 120000;
+      const red = Number.isFinite(ot.red) ? ot.red : 140000;
+      const hard = Number.isFinite(ot.hard) ? ot.hard : 160000;
+      barCaution = yellow;
+      barLimit = hard;
+      barCeiling = Math.max(Math.round(hard * 1.25), ctx, 200000);
+
+      const pct = Math.round((ctx / hard) * 100);
+      $('hero-pct').textContent = `${pct}% of ${fmtK(hard)} hard gate`;
+
+      const headroom = hard - ctx;
+      headroomEl.textContent = headroom >= 0
+        ? `${fmtNum(headroom)} to Hard Gate`
+        : `${fmtNum(Math.abs(headroom))} over Hard Gate`;
+      headroomEl.classList.toggle('over-limit', headroom < 0);
+
+      const yellowPct = Math.max(0, Math.min(99, (yellow / barCeiling) * 100));
+      const redPct = Math.max(0, Math.min(99, (red / barCeiling) * 100));
+      const hardPct = Math.max(0, Math.min(99, (hard / barCeiling) * 100));
+
+      tickCaution.style.left = `${yellowPct.toFixed(1)}%`;
+      tickCaution.title = `Yellow threshold (${fmtK(yellow)})`;
+      tickDumb.style.left = `${redPct.toFixed(1)}%`;
+      tickDumb.title = `Red threshold (${fmtK(red)})`;
+      tickHard.style.left = `${hardPct.toFixed(1)}%`;
+      tickHard.title = `Hard Gate (${fmtK(hard)})`;
+      tickHard.classList.remove('hidden');
+
+      lblCaution.textContent = fmtK(yellow);
+      lblDumb.textContent = fmtK(red);
+      lblHard.textContent = fmtK(hard);
+      $('label-ceiling').textContent = fmtK(barCeiling);
+
+      lblCaution.style.left = `${yellowPct.toFixed(1)}%`;
+      lblDumb.style.left = `${redPct.toFixed(1)}%`;
+      lblHard.style.left = `${hardPct.toFixed(1)}%`;
+
+      lblCaution.classList.toggle('hidden', yellowPct < 8 || (redPct - yellowPct) < 8 || (100 - yellowPct) < 8);
+      lblDumb.classList.toggle('hidden', redPct < 8 || (hardPct - redPct) < 8 || (100 - redPct) < 8);
+      lblHard.classList.toggle('hidden', hardPct < 8 || (100 - hardPct) < 8);
+    } else {
+      const pct = !otel && Number.isFinite(metrics.pctOfDumbZone)
+        ? Math.round(metrics.pctOfDumbZone)
+        : Math.round((ctx / barLimit) * 100);
+      $('hero-pct').textContent = `${pct}% of ${fmtK(barLimit)} limit`;
+
+      const headroom = !otel && Number.isFinite(metrics.headroomToDumbZone)
+        ? metrics.headroomToDumbZone
+        : barLimit - ctx;
+      headroomEl.textContent = headroom >= 0
+        ? `${fmtNum(headroom)} left`
+        : `${fmtNum(Math.abs(headroom))} over limit`;
+      headroomEl.classList.toggle('over-limit', headroom < 0);
+
+      const cautionPct = Math.max(0, Math.min(99, (barCaution / barCeiling) * 100));
+      const dumbPct = Math.max(0, Math.min(99, (barLimit / barCeiling) * 100));
+      tickCaution.style.left = `${cautionPct.toFixed(1)}%`;
+      tickCaution.title = 'Caution threshold';
+      tickDumb.style.left = `${dumbPct.toFixed(1)}%`;
+      tickDumb.title = 'Dumb Zone threshold';
+      tickHard.classList.add('hidden');
+      lblHard.classList.add('hidden');
+
+      lblCaution.textContent = fmtK(barCaution);
+      lblDumb.textContent = fmtK(barLimit);
+      $('label-ceiling').textContent = fmtK(barCeiling);
+
+      lblCaution.style.left = `${cautionPct.toFixed(1)}%`;
+      lblDumb.style.left = `${dumbPct.toFixed(1)}%`;
+      lblCaution.classList.toggle('hidden', cautionPct < 9 || (dumbPct - cautionPct) < 9 || (100 - cautionPct) < 9);
+      lblDumb.classList.toggle('hidden', dumbPct < 9 || (100 - dumbPct) < 9);
+    }
+
+    const fillPct = Math.max(0, Math.min(100, (ctx / barCeiling) * 100));
     fillEl.style.width = `${fillPct.toFixed(1)}%`;
     fillEl.className = `gauge-fill zone-${zone}`;
 
-    const cautionPct = Math.max(0, Math.min(99, (caution / ceiling) * 100));
-    const dumbPct = Math.max(0, Math.min(99, (dumb / ceiling) * 100));
-    $('tick-caution').style.left = `${cautionPct.toFixed(1)}%`;
-    $('tick-dumb').style.left = `${dumbPct.toFixed(1)}%`;
-
-    const lblCaution = $('label-caution');
-    const lblDumb = $('label-dumb');
-    lblCaution.textContent = fmtK(caution);
-    lblDumb.textContent = fmtK(dumb);
-    $('label-ceiling').textContent = fmtK(ceiling);
-
-    lblCaution.style.left = `${cautionPct.toFixed(1)}%`;
-    lblDumb.style.left = `${dumbPct.toFixed(1)}%`;
-    lblCaution.classList.toggle('hidden', cautionPct < 9 || (dumbPct - cautionPct) < 9 || (100 - cautionPct) < 9);
-    lblDumb.classList.toggle('hidden', dumbPct < 9 || (100 - dumbPct) < 9);
-
-    $('dumb-banner').classList.toggle('hidden', zone !== 'dumb');
+    const showHardGate = Boolean(otel && otelZone === 'hard');
+    if (showHardGate) {
+      const hardThreshold = Number.isFinite(otel.thresholds?.hard) ? otel.thresholds.hard : 160000;
+      const thrEl = $('hard-gate-threshold');
+      if (thrEl) thrEl.textContent = fmtK(hardThreshold);
+    }
+    $('hard-gate-banner').classList.toggle('hidden', !showHardGate);
+    $('dumb-banner').classList.toggle('hidden', showHardGate || metrics.zone !== 'dumb');
     $('compaction-pending-banner').classList.toggle('hidden', !metrics.postCompactionPending);
 
     const modelBadge = $('model-badge');
     const modelName = shortModel(metrics.model);
-    const isManual = eff.source === 'manual' || metrics.thresholdSource === 'manual';
     const isFallback = !isManual && eff.source === 'fallback';
     modelBadge.classList.toggle('fallback', isFallback);
     if (isManual) {
       modelBadge.textContent = `${modelName} · Manual`;
-      modelBadge.title = `${metrics.model || 'Unknown model'} | Manual (${fmtK(caution)} / ${fmtK(dumb)} / ${fmtK(ceiling)})`;
+      modelBadge.title = `${metrics.model || 'Unknown model'} | Manual (${fmtK(barCaution)} / ${fmtK(barLimit)} / ${fmtK(barCeiling)})`;
     } else if (isFallback) {
       modelBadge.textContent = `${modelName} · Auto (Default)`;
-      modelBadge.title = `Unrecognized model "${metrics.model || 'unknown'}" — using default fallback thresholds (${fmtK(caution)} / ${fmtK(dumb)} / ${fmtK(ceiling)})`;
+      modelBadge.title = `Unrecognized model "${metrics.model || 'unknown'}" — using default fallback thresholds (${fmtK(barCaution)} / ${fmtK(barLimit)} / ${fmtK(barCeiling)})`;
     } else {
       const profileDesc = eff.profileLabel || metrics.profileLabel || 'Profile';
       const srcNote = metrics.modelSource && metrics.modelSource !== 'none'
         ? ` via ${metrics.modelSource}`
         : '';
       modelBadge.textContent = `${modelName} · Auto (${profileDesc})`;
-      modelBadge.title = `${metrics.model || 'Unknown model'}${srcNote} | ${profileDesc} (${fmtK(caution)} / ${fmtK(dumb)} / ${fmtK(ceiling)})`;
+      modelBadge.title = `${metrics.model || 'Unknown model'}${srcNote} | ${profileDesc} (${fmtK(barCaution)} / ${fmtK(barLimit)} / ${fmtK(barCeiling)})`;
     }
 
     const deltaEl = $('delta-badge');
-    if (metrics.lastCompaction && metrics.lastCompaction.postContext === ctx) {
-      deltaEl.textContent = `Compacted: ${fmtK(metrics.lastCompaction.preContext)} → ${fmtK(ctx)}`;
+    if (metrics.lastCompaction && metrics.lastCompaction.postContext === metrics.contextTokens) {
+      deltaEl.textContent = `Compacted: ${fmtK(metrics.lastCompaction.preContext)} → ${fmtK(metrics.contextTokens)}`;
     } else {
       deltaEl.textContent = `Last step: ${fmtSigned(metrics.delta)}`;
     }
   }
 
-  function renderMetricsGrid(metrics, cfg) {
+  function renderMetricsGrid(metrics, cfg, orchestrator = null) {
     const cacheRead = metrics.cacheRead || 0;
     const hitPct = Math.round((metrics.cacheHitRate || 0) * 100);
     $('val-cache-read').textContent = fmtNum(cacheRead);
@@ -420,7 +591,9 @@
 
     const burnEl = $('val-burn');
     const subBurnEl = $('sub-burn');
-    if (metrics.zone === 'dumb') {
+    if (orchestrator?.zone === 'hard') {
+      burnEl.textContent = 'Hard Gate';
+    } else if (metrics.zone === 'dumb') {
       burnEl.textContent = 'Limit hit';
     } else if (Number.isFinite(metrics.estimatedTurnsToDumbZone) && metrics.estimatedTurnsToDumbZone > 0) {
       burnEl.textContent = `~${metrics.estimatedTurnsToDumbZone} turns`;
@@ -469,15 +642,7 @@
       : pad.left + (i / (series.length - 1)) * plotW);
     const yOfVal = (v) => pad.top + plotH - Math.max(0, Math.min(1, v / yMax)) * plotH;
 
-    // Defs for area gradient
-    const defs = svgEl('defs');
-    const grad = svgEl('linearGradient', { id: 'tcAreaGrad', x1: '0', y1: '0', x2: '0', y2: '1' });
-    grad.appendChild(svgEl('stop', { offset: '0%', 'stop-color': 'var(--tc-primary)', 'stop-opacity': '0.28' }));
-    grad.appendChild(svgEl('stop', { offset: '100%', 'stop-color': 'var(--tc-primary)', 'stop-opacity': '0.02' }));
-    defs.appendChild(grad);
-    svg.appendChild(defs);
-
-    // Dumb Zone danger band
+    // Dumb Zone / Hard Gate danger band
     const yDumb = yOfVal(dumb);
     if (yDumb > pad.top) {
       svg.appendChild(svgEl('rect', {
@@ -490,11 +655,20 @@
       }));
     }
 
-    // Horizontal threshold lines + Y labels
-    const refLines = [
-      { val: caution, color: 'var(--tc-caution)', label: fmtK(caution) },
-      { val: dumb, color: 'var(--tc-dumb)', label: fmtK(dumb) },
-    ];
+    // Horizontal threshold lines + Y labels (2 lines in standard/manual, 3 in orchestrator auto)
+    const isOrchAuto = Boolean(cfg.isOrchestratorAuto && Number.isFinite(cfg.redThreshold));
+    const refLines = isOrchAuto
+      ? [
+          { val: caution, color: 'var(--tc-caution)', label: fmtK(caution) },
+          { val: cfg.redThreshold, color: 'var(--tc-dumb)', label: fmtK(cfg.redThreshold) },
+          { val: dumb, color: 'var(--tc-hard-bg)', label: fmtK(dumb) },
+        ]
+      : [
+          { val: caution, color: 'var(--tc-caution)', label: fmtK(caution) },
+          { val: dumb, color: 'var(--tc-dumb)', label: fmtK(dumb) },
+        ];
+
+    let lastLabelY = Infinity;
     for (const ref of refLines) {
       const y = yOfVal(ref.val);
       svg.appendChild(svgEl('line', {
@@ -505,18 +679,21 @@
         stroke: ref.color,
         'stroke-width': '1',
         'stroke-dasharray': '3 3',
-        'stroke-opacity': '0.8',
+        'stroke-opacity': '0.85',
       }));
-      const txt = svgEl('text', {
-        x: pad.left - 5,
-        y: y + 3,
-        'text-anchor': 'end',
-        fill: ref.color,
-        'font-size': '9.5',
-        'font-family': 'var(--tc-mono)',
-      });
-      txt.textContent = ref.label;
-      svg.appendChild(txt);
+      if (Math.abs(lastLabelY - y) >= 9) {
+        const txt = svgEl('text', {
+          x: pad.left - 5,
+          y: y + 3,
+          'text-anchor': 'end',
+          fill: ref.color,
+          'font-size': '9.5',
+          'font-family': 'var(--tc-mono)',
+        });
+        txt.textContent = ref.label;
+        svg.appendChild(txt);
+        lastLabelY = y;
+      }
     }
 
     // Baseline 0 & yMax labels
@@ -608,7 +785,7 @@
       const lineD = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
       const areaD = `${lineD} L${coords[coords.length - 1].x.toFixed(1)},${(pad.top + plotH).toFixed(1)} L${coords[0].x.toFixed(1)},${(pad.top + plotH).toFixed(1)} Z`;
 
-      svg.appendChild(svgEl('path', { d: areaD, fill: 'url(#tcAreaGrad)' }));
+      svg.appendChild(svgEl('path', { d: areaD, fill: 'var(--tc-primary)', 'fill-opacity': '0.10' }));
       svg.appendChild(svgEl('path', {
         d: lineD,
         fill: 'none',
@@ -773,6 +950,13 @@
 
   // ---------- Settings Drawer ----------
   function formatProfileReadout(eff, thresholdMode, model) {
+    if (thresholdMode !== 'manual' && state.lastSnap?.orchestrator) {
+      const ot = state.lastSnap.orchestrator.thresholds || {};
+      const y = Number.isFinite(ot.yellow) ? ot.yellow : 120000;
+      const r = Number.isFinite(ot.red) ? ot.red : 140000;
+      const h = Number.isFinite(ot.hard) ? ot.hard : 160000;
+      return `Auto: Orchestrator Guard · ${fmtK(y)} / ${fmtK(r)} / ${fmtK(h)}`;
+    }
     const c = eff?.cautionThreshold ?? state.settings.cautionThreshold;
     const d = eff?.dumbZoneThreshold ?? state.settings.dumbZoneThreshold;
     const g = eff?.gaugeCeiling ?? state.settings.gaugeCeiling;
@@ -857,7 +1041,57 @@
     }
   }
 
+  function bindCopyCompactButton(btn) {
+    if (!btn) return;
+    let resetTimer = null;
+    btn.addEventListener('click', async () => {
+      let copied = false;
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText('/compact');
+          copied = true;
+        }
+      } catch {
+        // Fallback below
+      }
+      if (!copied) {
+        const ta = document.createElement('textarea');
+        ta.value = '/compact';
+        ta.style.cssText = 'position:fixed;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          copied = document.execCommand('copy');
+        } catch {
+          copied = false;
+        }
+        ta.remove();
+      }
+      if (resetTimer) {
+        clearTimeout(resetTimer);
+        resetTimer = null;
+      }
+      btn.textContent = copied ? 'Copied!' : 'Run /compact';
+      resetTimer = setTimeout(() => {
+        btn.innerHTML = COPY_BTN_HTML;
+        resetTimer = null;
+      }, 1800);
+    });
+  }
+
   function bindEvents() {
+    // Theme toggle (Bohemian Art Nouveau Dark 2700K <-> Light 4000K)
+    $('theme-toggle')?.addEventListener('click', () => {
+      const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+      const next = current === 'light' ? 'dark' : 'light';
+      try {
+        localStorage.setItem(THEME_OVERRIDE_KEY, next);
+      } catch {
+        // Ignore storage errors
+      }
+      applyTheme(next);
+    });
+
     // Settings toggle
     $('settings-toggle').addEventListener('click', () => {
       const drawer = $('settings-drawer');
@@ -996,41 +1230,9 @@
       refreshSessions();
     });
 
-    // Copy /compact button
-    $('copy-compact-btn').addEventListener('click', async () => {
-      const btn = $('copy-compact-btn');
-      let copied = false;
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText('/compact');
-          copied = true;
-        }
-      } catch {
-        // Fallback below
-      }
-      if (!copied) {
-        const ta = document.createElement('textarea');
-        ta.value = '/compact';
-        ta.style.cssText = 'position:fixed;opacity:0';
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          copied = document.execCommand('copy');
-        } catch {
-          copied = false;
-        }
-        ta.remove();
-      }
-      if (state.copyResetTimer) {
-        clearTimeout(state.copyResetTimer);
-        state.copyResetTimer = null;
-      }
-      btn.textContent = copied ? 'Copied!' : 'Run /compact';
-      state.copyResetTimer = setTimeout(() => {
-        btn.innerHTML = COPY_BTN_HTML;
-        state.copyResetTimer = null;
-      }, 1800);
-    });
+    // Copy /compact buttons
+    bindCopyCompactButton($('copy-compact-btn'));
+    bindCopyCompactButton($('copy-hard-compact-btn'));
 
     // Chart hover
     const chart = $('growth-chart');

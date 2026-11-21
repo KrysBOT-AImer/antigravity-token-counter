@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-21
+
+### Added
+- **Orchestrator v2.1.0 Telemetry Bridge**: Reads strict-validated, freshness-checked (`<= 10 min`) guard telemetry from `sidecar_data/token-counter/orchestrator_telemetry/<conv_id>.json` via `lib/orchestrator_telemetry.mjs` and exposes it on `/api/metrics` (`orchestrator`).
+- **Strict Guard-Mirror 4-Zone Hero Card**: Renders the 4-zone Orchestrator meter (`green` / `yellow` / `red` / `hard`), Fork-Gate (`<= 60K`) and Compact pills, and a Hard-Gate `/compact` quick-copy alert banner when `compact_recommended` is active.
+- **Auto-Mode Threshold Adoption & Live Watch**: Adopts Orchestrator v2.1.0 `60K / 110K / 160K` thresholds in `Auto` mode when live telemetry is present, and monitors `orchestrator_telemetry/` in `/api/watch` for instant UI updates and ETag invalidation.
+- **Bohemian Art Nouveau UI Refresh**: Updated light (`4000K`) and dark (`2700K`) themes with Crisp Flat-Tonal Minimalism styling.
+
 ## [1.0.0] - 2026-11-20
 
 ### Added

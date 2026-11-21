@@ -830,3 +830,125 @@ test('server: end-to-end Orchestrator Neon + gemini-flash-worker-agy via /api/me
   assert.equal(json.metrics.contextTokens, 117085);
   assert.notEqual(json.metrics.model, 'gemini-flash-worker-agy');
 });
+
+test('server: orchestrator telemetry /api/metrics, ETag invalidation, /api/watch, and staleness fallback', async (t) => {
+  const { root, appDataDir, dataDir, uiDir } = setupEnv();
+  let app = null;
+  t.after(async () => {
+    if (app) await app.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const prevEnv = {
+    ANTIGRAVITY_LS_ADDRESS: process.env.ANTIGRAVITY_LS_ADDRESS,
+    ANTIGRAVITY_CSRF_TOKEN: process.env.ANTIGRAVITY_CSRF_TOKEN,
+    ANTIGRAVITY_SIDECAR_WEB_PORT: process.env.ANTIGRAVITY_SIDECAR_WEB_PORT,
+    ANTIGRAVITY_SIDECAR_UI_TOKEN: process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN,
+    ANTIGRAVITY_CONVERSATION_ID: process.env.ANTIGRAVITY_CONVERSATION_ID,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR,
+  };
+  t.after(() => {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  process.env.ANTIGRAVITY_LS_ADDRESS = '127.0.0.1:1';
+  process.env.ANTIGRAVITY_CSRF_TOKEN = 'csrf-test';
+  process.env.ANTIGRAVITY_SIDECAR_WEB_PORT = '0';
+  process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN = 'secret-token';
+  process.env.ANTIGRAVITY_CONVERSATION_ID = 'main-1';
+  process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR = dataDir;
+
+  let fakeNowMs = Date.parse('2026-11-21T12:00:00.000Z');
+  app = createServerApp({
+    appDataDir,
+    dataDir,
+    uiDir,
+    locksPath: join(appDataDir, 'missing_locks'),
+    now: () => fakeNowMs,
+  });
+  const server = await app.run();
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  // 1. No telemetry file -> orchestrator: null
+  const r1 = await fetch(`${baseUrl}/api/metrics?conversationId=main-1&mode=current`);
+  assert.equal(r1.status, 200);
+  const j1 = await r1.json();
+  assert.equal(j1.orchestrator, null);
+  assert.ok(j1.etag);
+
+  // 2. Write valid telemetry -> ETag invalidates (unchanged: false) and returns orchestrator object
+  const otelDir = join(appDataDir, 'sidecar_data', 'token-counter', 'orchestrator_telemetry');
+  mkdirSync(otelDir, { recursive: true });
+  const otelPath = join(otelDir, 'main-1.json');
+
+  const initialOtel = {
+    schema_version: 1,
+    conversation_id: 'main-1',
+    timestamp: '2026-11-21T11:59:50.000Z',
+    active_tokens: 45000,
+    source: 'transcript_usage',
+    zone: 'green',
+    fork_eligible: true,
+    compact_recommended: false,
+    thresholds: { fork_max: 60000, yellow: 60000, red: 110000, hard: 160000 },
+  };
+  writeFileSync(otelPath, JSON.stringify(initialOtel), 'utf-8');
+
+  const r2 = await fetch(
+    `${baseUrl}/api/metrics?conversationId=main-1&mode=current&etag=${encodeURIComponent(j1.etag)}`
+  );
+  const j2 = await r2.json();
+  assert.equal(j2.unchanged, false);
+  assert.notEqual(j2.etag, j1.etag);
+  assert.equal(j2.orchestrator.zone, 'green');
+  assert.equal(j2.orchestrator.active_tokens, 45000);
+  assert.equal(j2.orchestrator.fork_eligible, true);
+  assert.equal(j2.orchestrator.compact_recommended, false);
+  assert.deepEqual(j2.orchestrator.thresholds, initialOtel.thresholds);
+  assert.equal(j2.orchestrator.source, 'transcript_usage');
+  assert.equal(j2.orchestrator.ageMs, 10_000);
+
+  // 3. /api/watch wakes up promptly when telemetry file is updated
+  const wInitRes = await fetch(`${baseUrl}/api/watch?since=0&timeoutMs=1000`);
+  const wInit = await wInitRes.json();
+  const watchPromise = fetch(`${baseUrl}/api/watch?since=${wInit.revision}&timeoutMs=5000`);
+  await new Promise((r) => setTimeout(r, 40));
+
+  fakeNowMs = Date.parse('2026-11-21T12:00:05.000Z');
+  const updatedOtel = {
+    ...initialOtel,
+    timestamp: '2026-11-21T12:00:05.000Z',
+    active_tokens: 165000,
+    zone: 'hard',
+    fork_eligible: false,
+    compact_recommended: true,
+  };
+  writeFileSync(otelPath, JSON.stringify(updatedOtel), 'utf-8');
+
+  const watchRes = await watchPromise;
+  const watchJson = await watchRes.json();
+  assert.equal(watchJson.changed, true);
+  assert.ok(watchJson.revision > wInit.revision);
+
+  const r3 = await fetch(
+    `${baseUrl}/api/metrics?conversationId=main-1&mode=current&etag=${encodeURIComponent(j2.etag)}`
+  );
+  const j3 = await r3.json();
+  assert.equal(j3.unchanged, false);
+  assert.notEqual(j3.etag, j2.etag);
+  assert.equal(j3.orchestrator.zone, 'hard');
+  assert.equal(j3.orchestrator.active_tokens, 165000);
+  assert.equal(j3.orchestrator.compact_recommended, true);
+
+  // 4. Stale telemetry (> 10 min old) falls back to orchestrator: null
+  fakeNowMs = Date.parse('2026-11-21T12:15:00.000Z');
+  const r4 = await fetch(
+    `${baseUrl}/api/metrics?conversationId=main-1&mode=current&etag=${encodeURIComponent(j3.etag)}`
+  );
+  const j4 = await r4.json();
+  assert.equal(j4.unchanged, false);
+  assert.equal(j4.orchestrator, null);
+});
